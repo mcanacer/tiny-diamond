@@ -1,0 +1,5 @@
+torch>=2.0
+numpy
+pillow
+pygame   # only for play.py
+crafter  # only for the Crafter environment

@@ -1,0 +1,10 @@
+# recorded game data (regenerate with record.py; Colab caches it on Drive)
+data/
+# training outputs and checkpoints (Colab keeps them on Drive)
+outputs/*
+!outputs/model_base_plus1500.pt
+diagnostics/**/*.png
+__pycache__/
+*.pyc
+*.tmp
+.ipynb_checkpoints/
