@@ -15,6 +15,7 @@ low-learning-rate phase at the end matters a lot).
 DIAMOND equivalent: src/trainer.py -> train_component("denoiser", ...)
 """
 import argparse
+import json
 import math
 import os
 import time
@@ -23,8 +24,9 @@ from pathlib import Path
 
 import torch
 
-from wm.config import EXPERIMENTS, build_denoiser, config_from_dict, make_config
-from wm.data import WindowDataset, collate, load_episodes
+from wm.config import EXPERIMENTS, build_model, config_from_dict, make_config
+from wm.data import Batch, WindowDataset, collate, load_episodes
+from wm.world_model import load_autoencoder
 
 p = argparse.ArgumentParser()
 p.add_argument("--exp", default=None, help="named experiment from wm/config.py EXPERIMENTS (sets env, model, out)")
@@ -37,6 +39,8 @@ p.add_argument("--steps", type=int, default=None)
 p.add_argument("--batch_size", type=int, default=None)
 p.add_argument("--lr", type=float, default=None)
 p.add_argument("--K", type=int, default=None, help="context frames (memory); must divide 256, e.g. 4 or 8")
+p.add_argument("--model", default=None, choices=["unet", "dit", "ae"], help="what to train (default unet)")
+p.add_argument("--latent", default=None, help="autoencoder (experiment name or .pt path) to work in latent space")
 p.add_argument("--channels", type=int, nargs="+", default=None, help="U-Net widths per level, e.g. 64 128 128 256")
 p.add_argument("--ctx_noise_max", type=float, default=None, help="context noise augmentation (GameNGen); try 0.7")
 p.add_argument("--rollout_steps", type=int, default=None, help="self-rollout context (needs --init)")
@@ -84,9 +88,31 @@ if out.exists() and not args.no_resume and not args.overfit:
     print(f"resuming {out} from step {state['step']}/{cfg.steps}")
 else:
     flags = dict(steps=args.steps, batch_size=args.batch_size, lr=args.lr, channels=args.channels, K=args.K,
-                 ctx_noise_max=args.ctx_noise_max, rollout_steps=args.rollout_steps)
+                 ctx_noise_max=args.ctx_noise_max, rollout_steps=args.rollout_steps, model=args.model,
+                 latent=args.latent)
     exp.update({k: v for k, v in flags.items() if v is not None})  # explicit flags override the experiment
     cfg = make_config(args.env, **exp)
+
+# ---- latent space: load the (finished) autoencoder; it is frozen and saved inside our checkpoint ----
+ae, ae_payload = None, None
+if cfg.model != "ae" and cfg.latent:
+    if state is not None and "ae" in state:
+        ae_payload = state["ae"]
+    else:
+        ae_path = Path(cfg.latent)
+        if not ae_path.exists():
+            ae_path = Path(args.runs_dir) / f"{cfg.latent}.pt"
+        if not ae_path.exists():
+            raise SystemExit(f"autoencoder {cfg.latent!r} not found (looked for {ae_path}). "
+                             f"Train it first: python train.py --exp {cfg.latent} --runs_dir {args.runs_dir}")
+        ae_ck = torch.load(ae_path, map_location="cpu", weights_only=False)
+        ae_cfg = config_from_dict(ae_ck["cfg"])
+        if ae_ck.get("step", 0) < ae_cfg.steps:
+            raise SystemExit(f"autoencoder {ae_path} has not finished training ({ae_ck.get('step')}/{ae_cfg.steps} steps)")
+        ae_payload = {"model": ae_ck["model"], "cfg": ae_ck["cfg"]}
+    ae = load_autoencoder(ae_payload, device)
+    cfg.latent_channels = ae.cfg.latent_channels
+    cfg.latent_size = cfg.img_size // ae.downsample
 
 torch.manual_seed(0)
 episodes = load_episodes(data_dir)
@@ -96,7 +122,7 @@ loader = torch.utils.data.DataLoader(ds, batch_size=cfg.batch_size, shuffle=True
                                      drop_last=True, num_workers=workers, pin_memory=device == "cuda",
                                      persistent_workers=workers > 0)
 
-model = build_denoiser(cfg).to(device)
+model = build_model(cfg).to(device)
 opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-2)
 warmup = min(1000, cfg.steps // 10)
 
@@ -137,28 +163,40 @@ gpu = torch.cuda.get_device_name() if device == "cuda" else device
 print(f"exp={args.exp or '-'}  out={out}  gpu={gpu}  precision={str(amp_dtype).split('.')[-1] if use_amp else 'fp32'}")
 print(f"env={cfg.env}  device={device}  params={n_params:.2f}M  windows={len(ds)}  "
       f"batch={cfg.batch_size}  lr={cfg.lr}  steps={cfg.steps}")
-print(f"ctx_noise_max={cfg.ctx_noise_max}  rollout_steps={cfg.rollout_steps}")
+space = f"latent {cfg.latent_channels}x{cfg.latent_size}x{cfg.latent_size} (ae={cfg.latent})" if ae else "pixels"
+print(f"model={cfg.model}  space={space}  K={cfg.K}  ctx_noise_max={cfg.ctx_noise_max}  "
+      f"rollout_steps={cfg.rollout_steps}" + (f"  train_mode={cfg.train_mode}" if cfg.model == "dit" else ""))
 
 
 def save(path: Path, final=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"model": model.state_dict(), "cfg": asdict(cfg), "step": step}
+    if ae_payload is not None:
+        payload["ae"] = ae_payload  # latent world models carry their autoencoder
     if not final:
         payload.update(opt=opt.state_dict(), sched=sched.state_dict(),
                        scaler=scaler.state_dict() if scaler.is_enabled() else None)
     tmp = path.with_suffix(".tmp")
     torch.save(payload, tmp)
     os.replace(tmp, path)  # atomic: a crash mid-save never leaves a broken checkpoint
+    # small status file next to the checkpoint (the Colab runner polls this instead of loading the .pt)
+    status = {"exp": args.exp, "step": step, "steps": cfg.steps, "done": step >= cfg.steps, "model": cfg.model}
+    path.with_suffix(".json").write_text(json.dumps(status))
+
+
+def prepare(b):
+    b = b.to(device)
+    return Batch(ae.encode(b.obs), b.act) if ae is not None else b  # frames -> latents on the GPU
 
 
 def batches():
     if args.overfit:
-        b = next(iter(loader)).to(device)
+        b = prepare(next(iter(loader)))
         while True:
             yield b
     while True:
         for b in loader:
-            yield b.to(device)
+            yield prepare(b)
 
 
 model.train()

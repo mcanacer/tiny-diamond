@@ -12,11 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import torch
 
-from wm.config import build_denoiser, config_from_dict
 from wm.data import to_tensor, to_uint8
+from wm.world_model import WorldModel
 from wm.env import ToyGame, random_policy
-from wm.rollout import WorldModelEnv
-from wm.sampler import Sampler
 
 
 def red_mask(img):   # ball pixels: strong red, weak green/blue
@@ -28,13 +26,9 @@ def blue_mask(img):
 
 
 def load_model(ckpt, ctx_noise=0.0):
-    ck = torch.load(ckpt, map_location="cpu", weights_only=False)
-    cfg = config_from_dict(ck["cfg"])
-    model = build_denoiser(cfg)
-    model.load_state_dict(ck["model"])
-    model.eval()
-    model.ctx_noise_inference = ctx_noise
-    return model, cfg
+    """Any toy-game world model (U-Net or transformer) behind the common WorldModel interface."""
+    wm = WorldModel(ckpt, "cpu", None, ctx_noise)
+    return wm, wm.cfg
 
 
 def run_sessions(model, cfg, runs=32, steps=600, policy="random", seed=500, denoise_steps=3, keep_frames=False):
@@ -44,7 +38,8 @@ def run_sessions(model, cfg, runs=32, steps=600, policy="random", seed=500, deno
     Returns dict of arrays shaped (steps, runs): ball_px, pos_err, contact, near_wall
     (+ frames if keep_frames)."""
     K = cfg.K
-    env = WorldModelEnv(Sampler(model, denoise_steps))
+    env = model  # a WorldModel: reset(frames, actions) / step(action)
+    env.n_steps = denoise_steps
     torch.manual_seed(seed)
     games = [ToyGame(cfg.img_size, seed=seed + i) for i in range(runs)]
     rngs = [np.random.default_rng(seed + i) for i in range(runs)]

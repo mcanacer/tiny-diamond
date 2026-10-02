@@ -37,6 +37,8 @@ def record_episode(job):
         frames.append(frame)     # ... and produces frame t+1
         if done:
             break
+    if hasattr(game, "close"):
+        game.close()
     tmp = path.with_name("tmp_" + path.name)  # must NOT match ep_*.npz, which is what the loader reads
     np.savez_compressed(tmp, obs=np.stack(frames).astype(np.uint8), act=np.array(actions, dtype=np.int64))
     os.replace(tmp, path)

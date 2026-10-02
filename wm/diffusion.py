@@ -45,6 +45,7 @@ class DiffusionConfig:
     sigma_max: float = 20.0
     ctx_noise_max: float = 0.0       # >0 enables context noise augmentation (GameNGen used ~0.7)
     rollout_steps: int = 0           # >0 enables self-rollout context
+    clamp: bool = True               # clamp predictions to [-1, 1]: right for pixels, wrong for latents
     rollout_denoise_steps: int = 3   # make rollout frames exactly like at play time (sampler steps)
     rollout_frac: float = 0.5        # fraction of each batch that gets the self-rollout context
                                      # (the rest keeps real context, so the clean case isn't forgotten)
@@ -145,4 +146,5 @@ class Denoiser(nn.Module):
         if ctx_level is None:
             ctx_level = torch.full((x_noisy.shape[0],), self.ctx_noise_inference, device=x_noisy.device)
         out, c_skip, c_out = self._net(x_noisy, sigma, obs, act, ctx_level)
-        return (c_skip * x_noisy + c_out * out).clamp(-1, 1)
+        d = c_skip * x_noisy + c_out * out
+        return d.clamp(-1, 1) if self.cfg.clamp else d

@@ -15,6 +15,9 @@ Game keys:
     crafter   WASD move, space = do (hit/collect), tab = sleep,
               r/t/f/p = place stone/table/furnace/plant, 1-6 = craft tools
               (same keys as Crafter's own GUI; no key = noop)
+    atari     arrows move, space fires (combos like up+right+space work for Boxing)
+    doom_maze w forward, a/d turn, w+a / w+d forward while turning, q/e strafe (arrows work too)
+    doom_defend  a/d turn, space shoot (a+space / d+space turn while shooting)
 
 App keys:
     enter            reset both games (new world)
@@ -23,6 +26,7 @@ App keys:
     .                pause
     esc              quit
 
+Works with every model type (U-Net or transformer, pixels or latents).
 Runs on NVIDIA (cuda), Apple Silicon (mps) or CPU.  DIAMOND equivalent: src/play.py + src/game/
 """
 import argparse
@@ -32,15 +36,12 @@ import numpy as np
 import pygame
 import torch
 
-from wm.config import Config, build_denoiser, config_from_dict
 from wm.data import to_tensor, to_uint8
-from wm.envs import get_env
-from wm.rollout import WorldModelEnv
-from wm.sampler import Sampler
+from wm.world_model import WorldModel
 
 p = argparse.ArgumentParser()
 p.add_argument("--ckpt", default="outputs/model_base_plus1500.pt")
-p.add_argument("--denoise_steps", type=int, default=Config.denoise_steps)
+p.add_argument("--denoise_steps", type=int, default=None)
 p.add_argument("--fps", type=int, default=0, help="default: 12 toy, 8 crafter")
 p.add_argument("--scale", type=int, default=0, help="screen pixels per game pixel")
 p.add_argument("--no-real", dest="real", action="store_false", help="hide the real game panel")
@@ -54,20 +55,11 @@ p.add_argument("--screenshot", default="", help="save a screenshot at exit (for 
 args = p.parse_args()
 
 # ---- load the world model ---------------------------------------------------------
-ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-cfg = config_from_dict(ck["cfg"])
-spec = get_env(cfg.env)
-model = build_denoiser(cfg)
-model.load_state_dict(ck["model"])
-model.eval()
-model.ctx_noise_inference = args.ctx_noise
 device = args.device or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-model.to(device)
-sampler = Sampler(model, args.denoise_steps)
-wm_env = WorldModelEnv(sampler)
-K = cfg.K
+wm = WorldModel(args.ckpt, device, args.denoise_steps, args.ctx_noise)  # any model type, pixels or latents
+cfg, spec, K = wm.cfg, wm.spec, wm.K
 torch.set_grad_enabled(False)
-fps = args.fps or (8 if cfg.env == "crafter" else 12)
+fps = args.fps or (12 if cfg.env == "toy" else 8)
 scale = args.scale or (12 if cfg.env == "toy" else max(1, 512 // cfg.img_size))
 
 world_seed = args.seed
@@ -89,9 +81,9 @@ def reset():
 
 
 def seed_world_model(frames, actions):
-    obs = to_tensor(np.stack(frames[-K:]))[None].to(device)
-    act = torch.tensor(actions[-(K - 1):], dtype=torch.long)[None].to(device)
-    wm_env.reset(obs, act)
+    obs = to_tensor(np.stack(frames[-K:]))[None]
+    act = torch.tensor(actions[-(K - 1):], dtype=torch.long)[None]
+    wm.reset(obs, act)
 
 
 history_frames, history_actions = reset()
@@ -108,7 +100,9 @@ pygame.display.set_caption(f"tiny-diamond: playing {cfg.env} inside the world mo
 font = pygame.font.SysFont(None, 22)
 clock = pygame.time.Clock()
 
-KEYS = [(pygame.key.key_code(name), a) for name, a in spec.keymap.items()]
+# "w+a" = both keys held; the longest combo that is fully held wins (so w+a beats w)
+KEYS = sorted(((tuple(pygame.key.key_code(k) for k in combo.split("+")), a) for combo, a in spec.keymap.items()),
+              key=lambda kv: -len(kv[0]))
 auto_rng = np.random.default_rng(args.seed)
 
 
@@ -116,8 +110,8 @@ def current_action(prev: int) -> int:
     if args.autoplay:
         return spec.random_policy(auto_rng, prev)
     keys = pygame.key.get_pressed()
-    for k, a in KEYS:
-        if keys[k]:
+    for combo, a in KEYS:
+        if all(keys[k] for k in combo):
             return a
     return 0
 
@@ -146,14 +140,14 @@ while running:
             elif ev.key == pygame.K_PERIOD:
                 paused = not paused
             elif ev.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
-                sampler.n_steps = min(sampler.n_steps + 1, 20)
+                wm.n_steps = min(wm.n_steps + 1, 20)
             elif ev.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
-                sampler.n_steps = max(sampler.n_steps - 1, 1)
+                wm.n_steps = max(wm.n_steps - 1, 1)
 
     if not paused:
         action = current_action(action)
         t0 = time.time()
-        wm_frame = to_uint8(wm_env.step(torch.tensor([action], device=device)))[0]  # <- the world model
+        wm_frame = to_uint8(wm.step(torch.tensor([action])))[0]  # <- the world model
         if device == "mps":
             torch.mps.synchronize()
         ms = (time.time() - t0) * 1000
@@ -165,7 +159,7 @@ while running:
         n += 1
 
     screen.fill((12, 12, 16))
-    status = (f"action: {spec.action_names[action]:18s} denoise steps: {sampler.n_steps}   "
+    status = (f"action: {spec.action_names[action]:18s} denoise steps: {wm.n_steps}   "
               f"model: {ms:4.0f} ms/frame on {device}   {'PAUSED' if paused else ''}")
     screen.blit(font.render(status, True, (160, 200, 255)), (gap, 8))
     blit_frame(wm_frame, gap, "WORLD MODEL (you are playing here)")

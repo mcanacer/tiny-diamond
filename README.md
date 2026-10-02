@@ -1,9 +1,13 @@
 # tiny-diamond
 
 A from-scratch, minimal diffusion world model in the style of
-[DIAMOND](https://github.com/eloialonso/diamond) (~600 lines), built to learn from.
-It learns to predict the next frame of a toy game given the last K frames and actions,
+[DIAMOND](https://github.com/eloialonso/diamond), built to learn from, plus the main ideas of the
+2024-26 world models (latent autoencoders, causal transformers, Diffusion Forcing) as experiments you can
+compare one at a time. It learns to predict the next frame of a game from the last K frames and actions,
 then runs as a simulator by feeding its own predictions back in.
+
+**Games:** a toy paddle game (CPU), Crafter, Atari Breakout / Pong / Boxing, and ViZDoom (maze, combat).
+**Models:** DIAMOND-style U-Net, or causal diffusion transformer; on pixels or autoencoder latents.
 
 ## Quick start (toy game, runs on a laptop CPU)
 
@@ -92,6 +96,46 @@ from (its memory), so `play.py` takes them from the real game; after that, every
 `train.py` saves its full state every `--save_every` steps and resumes automatically when you re-run the same
 command. `--max_minutes` stops cleanly before a session limit. The learning rate warms up and then decays
 (cosine, to 10%); the toy experiments below showed the low-learning-rate phase matters a lot.
+
+## Environments
+
+| env | what it is | why it's interesting for a world model |
+|---|---|---|
+| `toy` | paddle + bouncing ball, 32x32 | runs on a laptop CPU; easy to measure exactly (`diagnostics/ball_tracker.py`) |
+| `crafter` | 2D Minecraft, scrolling view, inventory | invents new terrain at the edges, day/night, item counts |
+| `atari_breakout`, `atari_pong`, `atari_boxing` | DIAMOND's benchmark (frameskip 4, 64x64) | tiny fast objects (1-pixel ball), opponents |
+| `doom_maze` | ViZDoom `my_way_home`, walking a textured maze | 3D perspective, turning, GameNGen's setting |
+| `doom_defend` | ViZDoom `defend_the_center`, turning and shooting | monsters, muzzle flash, enemies dying |
+
+Record any of them with `python record.py --env <env>` (`pip install crafter vizdoom "gymnasium[atari]"`).
+
+## Newer methods (2024-26), as experiments
+
+| idea | from | where in the code | experiment |
+|---|---|---|---|
+| Context noise | GameNGen (2024) | `wm/diffusion.py` (`ctx_noise_max`) | `crafter_big_noise` |
+| Latent space: autoencode frames, diffuse latents | Oasis, Dreamer 4, Stable Diffusion | `wm/autoencoder.py` | `crafter_ae`, `crafter_latent_unet` |
+| Causal diffusion transformer | Dreamer 4, Matrix-Game, Waypoint-1 | `wm/dit.py` | `crafter_dit_last` |
+| Diffusion Forcing: every frame its own noise level | Chen et al. (2024) | `wm/dit.py` (`train_mode="df"`) | `crafter_dit_df` |
+| KV cache: context computed once per generated frame | standard for causal transformers | `wm/dit.py` (`context_cache`, `forward_new`) | used by all DiT models |
+| Longer memory | | `K=16` | `crafter_dit_df_k16` |
+
+How they fit together:
+
+- **Autoencoder.** 64x64x3 frames become 16x16x8 latents, normalised to std 0.5 so the EDM settings carry over.
+  The decoder is also trained on slightly noised latents, because at play time it decodes the world model's
+  imperfect predictions. A latent world model stores its autoencoder inside its checkpoint.
+- **Causal transformer.** Each frame becomes 64 tokens (2x2 latent patches). A window of K+1 frames is one
+  sequence with **block-causal** attention: tokens see their own frame and the past, never the future. Each
+  frame's noise level and the action that led into it condition every token through adaLN-Zero.
+- **Diffusion Forcing.** During training every frame in the window gets an independent random noise level and
+  every frame is denoised. The model learns to predict from any mix of clean and noisy history, so it's
+  built to cope with its own imperfect past. That's the problem context noise addressed, generalised.
+- **KV cache.** Context tokens never attend to the new frame, so their keys and values are computed once and
+  reused by all denoising steps. `tests/test_dit.py` checks that this gives the same result as the full computation.
+
+`wm/world_model.py` puts every model type behind one interface (`predict`, `reset`, `step`), so `evaluate.py`,
+`play.py` and `diagnostics/compare_wm.py` work with any of them.
 
 ## The five layers
 
