@@ -8,3 +8,5 @@ __pycache__/
 *.pyc
 *.tmp
 .ipynb_checkpoints/
+_vizdoom.ini
+_vizdoom/
