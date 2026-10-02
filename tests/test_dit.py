@@ -13,31 +13,35 @@ import torch
 from wm.data import Batch
 from wm.dit import DiTConfig, DiTDenoiser
 
-torch.manual_seed(0)
-cfg = DiTConfig(in_channels=8, frame_size=16, patch=2, dim=64, depth=2, heads=4, max_frames=5, num_actions=7)
-m = DiTDenoiser(cfg).eval()
-for p in m.parameters():  # zero-init layers would make the tests trivially pass; randomise everything
-    torch.nn.init.normal_(p, std=0.05)
 B, T = 2, 5
-x = torch.randn(B, T, 8, 16, 16)
-cn = torch.randn(B, T)
-act = torch.randint(0, 8, (B, T))
-
-# 1. causality
-out1 = m.net(x, cn, act)
-x2 = x.clone(); x2[:, 3:] += 1.0
-out2 = m.net(x2, cn, act)
-assert torch.allclose(out1[:, :3], out2[:, :3], atol=1e-5), "earlier frames changed when a later frame changed"
-assert not torch.allclose(out1[:, 3:], out2[:, 3:], atol=1e-3)
-print("ok causality: frames 0-2 unaffected by changes to frames 3-4")
-
-# 2. KV cache equivalence for the last frame
 K = T - 1
-cache = m.net.context_cache(x[:, :K], cn[:, :K], act[:, :K])
-new = m.net.forward_new(x[:, K], cn[:, K], act[:, K], cache, t_index=K)
-err = (new - out1[:, K]).abs().max().item()
-assert err < 1e-4, err
-print(f"ok kv-cache: cached generation matches full forward (max diff {err:.1e})")
+for attn in ["st", "full"]:
+    torch.manual_seed(0)
+    cfg = DiTConfig(in_channels=8, frame_size=16, patch=2, dim=64, depth=2, heads=4, max_frames=5, num_actions=7, attn=attn)
+    m = DiTDenoiser(cfg).eval()
+    for p in m.parameters():  # zero-init layers would make the tests trivially pass; randomise everything
+        torch.nn.init.normal_(p, std=0.05)
+    x = torch.randn(B, T, 8, 16, 16)
+    cn = torch.randn(B, T)
+    act = torch.randint(0, 8, (B, T))
+    out1 = m.net(x, cn, act)
+
+    # 1a. no peeking at the future
+    x2 = x.clone(); x2[:, 3:] += 1.0
+    out2 = m.net(x2, cn, act)
+    assert torch.allclose(out1[:, :3], out2[:, :3], atol=1e-5), "earlier frames changed when a later frame changed"
+    # 1b. the past DOES flow forward: changing frame 0 must change the last frame's output
+    x3 = x.clone(); x3[:, 0] += 1.0
+    out3 = m.net(x3, cn, act)
+    assert (out3[:, -1] - out1[:, -1]).abs().max() > 1e-3, "the last frame ignores earlier frames"
+    print(f"ok [{attn}] causality: no peeking at the future, and the past reaches the last frame")
+
+    # 2. KV cache equivalence for the last frame
+    cache = m.net.context_cache(x[:, :K], cn[:, :K], act[:, :K])
+    new = m.net.forward_new(x[:, K], cn[:, K], act[:, K], cache, t_index=K)
+    err = (new - out1[:, K]).abs().max().item()
+    assert err < 1e-4, err
+    print(f"ok [{attn}] kv-cache: cached generation matches full forward (max diff {err:.1e})")
 
 # 3. training losses + generation shapes
 for mode in ["df", "last"]:

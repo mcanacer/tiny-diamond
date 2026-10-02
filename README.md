@@ -115,7 +115,7 @@ Record any of them with `python record.py --env <env>` (`pip install crafter viz
 |---|---|---|---|
 | Context noise | GameNGen (2024) | `wm/diffusion.py` (`ctx_noise_max`) | `crafter_big_noise` |
 | Latent space: autoencode frames, diffuse latents | Oasis, Dreamer 4, Stable Diffusion | `wm/autoencoder.py` | `crafter_ae`, `crafter_latent_unet` |
-| Causal diffusion transformer | Dreamer 4, Matrix-Game, Waypoint-1 | `wm/dit.py` | `crafter_dit_last` |
+| Causal diffusion transformer (space-time attention) | Genie, Dreamer 4, Matrix-Game, Waypoint-1 | `wm/dit.py` | `crafter_dit_last` |
 | Diffusion Forcing: every frame its own noise level | Chen et al. (2024) | `wm/dit.py` (`train_mode="df"`) | `crafter_dit_df` |
 | KV cache: context computed once per generated frame | standard for causal transformers | `wm/dit.py` (`context_cache`, `forward_new`) | used by all DiT models |
 | Longer memory | | `K=16` | `crafter_dit_df_k16` |
@@ -125,14 +125,37 @@ How they fit together:
 - **Autoencoder.** 64x64x3 frames become 16x16x8 latents, normalised to std 0.5 so the EDM settings carry over.
   The decoder is also trained on slightly noised latents, because at play time it decodes the world model's
   imperfect predictions. A latent world model stores its autoencoder inside its checkpoint.
-- **Causal transformer.** Each frame becomes 64 tokens (2x2 latent patches). A window of K+1 frames is one
-  sequence with **block-causal** attention: tokens see their own frame and the past, never the future. Each
-  frame's noise level and the action that led into it condition every token through adaLN-Zero.
+- **Causal transformer.** Each frame becomes 64 tokens (2x2 latent patches). Every block does spatial
+  attention within each frame, then **causal** temporal attention along each patch position (never the
+  future), then an MLP. Each frame's noise level and the action that led into it condition every token
+  through adaLN-Zero. `attn="full"` switches to block-causal attention over all tokens.
 - **Diffusion Forcing.** During training every frame in the window gets an independent random noise level and
   every frame is denoised. The model learns to predict from any mix of clean and noisy history, so it's
   built to cope with its own imperfect past. That's the problem context noise addressed, generalised.
 - **KV cache.** Context tokens never attend to the new frame, so their keys and values are computed once and
   reused by all denoising steps. `tests/test_dit.py` checks that this gives the same result as the full computation.
+
+### What the toy game taught us about the transformer (CPU, 2000-2500 steps)
+
+| version | uses its context? | one-step error (copy-last = 0.019) |
+|---|---|---|
+| block-causal attention, per-frame log-normal noise | **no**: predictions barely change when the context is shuffled | 0.027 (worse than copying) |
+| + clean-history mixture in Diffusion Forcing | still no after 500 steps | 0.027 |
+| + space-time factorized attention (now the default) | **yes**: shuffled context raises the error 50% | **0.013** |
+
+Two fixes were needed:
+
+1. **Noise levels must include "clean past, noisy present".** With every frame's noise drawn from the same
+   log-normal, a window that looks like generation (clean history plus a pure-noise new frame) almost never
+   occurs in training. Frames are now "history" (noise below 0.1) half the time.
+2. **Attention layout.** With block-causal attention over all tokens, the model never discovered that
+   "the same spot in the previous frame" is the best evidence. Space-time factorization (spatial attention
+   within a frame, then causal attention along each patch position over time, as in Genie and Dreamer 4)
+   makes that path direct, and the model started using its context.
+
+At this small CPU budget the transformer is still much weaker than the U-Net, which predicts the toy game
+almost perfectly. In its rollouts the paddle follows the actions but the ball fades. Transformers usually need
+more data and steps than convolutional models to catch up, so the A100 runs on Crafter are the real test.
 
 `wm/world_model.py` puts every model type behind one interface (`predict`, `reset`, `step`), so `evaluate.py`,
 `play.py` and `diagnostics/compare_wm.py` work with any of them.

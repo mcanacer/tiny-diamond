@@ -44,6 +44,7 @@ class Config:
     dit_heads: int = 6
     patch: int = 2                  # patch size in (latent) pixels
     train_mode: str = "df"          # "df" = Diffusion Forcing, "last" = denoise only the last frame
+    attn: str = "st"                # "st" = space-time factorized attention, "full" = block-causal over all tokens
     # autoencoder (model="ae")
     ae_channels: List[int] = field(default_factory=lambda: [64, 128, 128])
     ae_latent_channels: int = 8
@@ -79,7 +80,7 @@ PRESETS = {
 _BIG = dict(channels=[64, 128, 128, 256])                       # 14.6M-param pixel U-Net
 _AE = dict(model="ae", steps=20000, lr=3e-4)                    # 3.1M autoencoder, 64x64x3 -> 16x16x8
 _LAT_UNET = dict(model="unet", channels=[96, 192, 256])          # 15.6M U-Net on 16x16 latents
-_DIT = dict(model="dit", dit_dim=320, dit_depth=8, dit_heads=5, patch=2)  # 15.2M causal transformer
+_DIT = dict(model="dit", dit_dim=288, dit_depth=7, dit_heads=6, patch=2)  # 14.9M causal transformer (space-time attention)
 
 EXPERIMENTS = {
     "toy": dict(env="toy"),
@@ -137,7 +138,7 @@ def build_model(cfg: Config):
     pixels = not cfg.latent
     if cfg.model == "dit":
         return DiTDenoiser(DiTConfig(in_channels=ch, frame_size=size, patch=cfg.patch, dim=cfg.dit_dim,
-                                     depth=cfg.dit_depth, heads=cfg.dit_heads, max_frames=cfg.K + 1,
+                                     depth=cfg.dit_depth, heads=cfg.dit_heads, max_frames=cfg.K + 1, attn=cfg.attn,
                                      num_actions=n_act, train_mode=cfg.train_mode,
                                      ctx_noise_max=cfg.ctx_noise_max, clamp=pixels))
     net = InnerModel(n_act, cfg.K, ch, cfg.cond_dim, cfg.channels, cfg.depth, ctx_noise=cfg.ctx_noise_max > 0)
