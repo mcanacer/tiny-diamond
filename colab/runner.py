@@ -10,6 +10,10 @@ already complete are skipped, and interrupted ones resume (train.py resumes from
     r.start()      # returns immediately; scheduling continues in a background thread
     r.status()     # table of what is waiting / running / done, with the last log line of each
     r.wait()       # block until everything has finished
+
+Equal-budget runs: Runner(names, runs_dir, steps=10000) trains every world model for exactly 10k steps
+with a complete learning-rate schedule and saves it as <name>_10k.pt, so short, cheap runs are still a
+fair comparison. Autoencoders always use their own schedule (they're shared, and trained only once).
 """
 import json
 import subprocess
@@ -42,13 +46,25 @@ def expand(names):
     return out
 
 
+def is_autoencoder(name):
+    return EXPERIMENTS[name].get("model") == "ae"
+
+
+def run_name(name, steps=None):
+    """File name of a run: <name> for its default length, <name>_<N>k for an equal-budget run."""
+    if not steps or is_autoencoder(name):
+        return name
+    return f"{name}_{steps // 1000}k" if steps % 1000 == 0 else f"{name}_{steps}"
+
+
 def envs_needed(names):
     return sorted({EXPERIMENTS[n]["env"] for n in expand(names)})
 
 
 class Runner:
-    def __init__(self, names, runs_dir, max_parallel=3, max_minutes=170, extra_args=(), poll=20):
+    def __init__(self, names, runs_dir, max_parallel=3, max_minutes=170, extra_args=(), poll=20, steps=None):
         self.names = expand(names)
+        self.steps = steps
         self.runs_dir = Path(runs_dir)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.max_parallel, self.max_minutes, self.extra_args, self.poll = max_parallel, max_minutes, list(extra_args), poll
@@ -56,8 +72,11 @@ class Runner:
         self.thread = None
 
     # ---- state -----------------------------------------------------------------------------------
+    def tag(self, n):
+        return run_name(n, self.steps)
+
     def _status_file(self, n):
-        f = self.runs_dir / f"{n}.json"
+        f = self.runs_dir / f"{self.tag(n)}.json"
         return json.loads(f.read_text()) if f.exists() else None
 
     def is_done(self, n):
@@ -79,9 +98,14 @@ class Runner:
 
     # ---- scheduling --------------------------------------------------------------------------------
     def _launch(self, n):
-        log = open(self.runs_dir / f"{n}.log", "a")
-        cmd = [sys.executable, "train.py", "--exp", n, "--runs_dir", str(self.runs_dir), "--save_every", "1000",
-               "--log_every", "200", "--max_minutes", str(self.max_minutes)] + self.extra_args
+        tag = self.tag(n)
+        log = open(self.runs_dir / f"{tag}.log", "a")
+        cmd = [sys.executable, "train.py", "--exp", n, "--runs_dir", str(self.runs_dir),
+               "--out", str(self.runs_dir / f"{tag}.pt"), "--save_every", "1000",
+               "--log_every", "200", "--max_minutes", str(self.max_minutes)]
+        if self.steps and tag != n:
+            cmd += ["--steps", str(self.steps)]
+        cmd += self.extra_args
         self.procs[n] = subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
 
     def _tick(self):
@@ -127,9 +151,9 @@ class Runner:
     def status(self):
         for n in self.names:
             last = ""
-            log = self.runs_dir / f"{n}.log"
+            log = self.runs_dir / f"{self.tag(n)}.log"
             if log.exists():
                 lines = [l for l in log.read_text(errors="ignore").splitlines()
                          if l.startswith(("step", "done", "resuming", "time limit")) or "Error" in l or "error" in l]
                 last = lines[-1].strip() if lines else ""
-            print(f"{n:24s} {self.state(n):34s} {last}")
+            print(f"{self.tag(n):28s} {self.state(n):34s} {last}")

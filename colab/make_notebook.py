@@ -33,12 +33,21 @@ changes **one thing per step**, all at ~15M parameters, so each comparison isola
 New environments, each with `<env>` (DIAMOND-size U-Net), `<env>_big_noise`, `<env>_ae`, `<env>_dit_df`:
 `atari_breakout`, `atari_pong`, `atari_boxing` (DIAMOND's benchmark) and `doom_maze`, `doom_defend` (3D, ViZDoom).
 
-Autoencoders are added automatically: latent models start as soon as their autoencoder has finished."""),
-    code("""# What to train in this session (autoencoders they need are added automatically).
-EXPERIMENTS = ['crafter_latent_unet', 'crafter_dit_last', 'crafter_dit_df', 'crafter_dit_df_k16']
+Autoencoders are added automatically: latent models start as soon as their autoencoder has finished.
 
-# What to compare at the end (grouped by environment automatically).
-COMPARE = ['crafter_big_noise', 'crafter_latent_unet', 'crafter_dit_last', 'crafter_dit_df', 'crafter_dit_df_k16']
+**Cheap and fair:** with `STEPS = 10000` every model trains the same short budget and *finishes* its
+learning-rate schedule. Comparing runs of different lengths, or runs stopped halfway (learning rate still high),
+mostly measures how far each got, not which method is better."""),
+    code("""# What to train in this session (autoencoders they need are added automatically).
+EXPERIMENTS = ['crafter_big_noise', 'crafter_latent_unet', 'crafter_dit_last', 'crafter_dit_df']
+
+# Training budget per world model. Every run gets exactly this many steps with a COMPLETE learning-rate
+# schedule (warmup, then decay), saved as <name>_<N>k.pt, so cheap short runs are still a fair comparison.
+# None = each experiment's own default length (40k steps). Autoencoders always use their own schedule.
+STEPS = 10000
+
+# What to compare at the end (same STEPS budget; grouped by environment automatically).
+COMPARE = EXPERIMENTS
 
 MAX_PARALLEL = 3     # runs at the same time on one GPU (A100: 3, T4: 1)
 MAX_MINUTES = 170    # each run stops cleanly after this long; re-run the notebook to continue
@@ -90,7 +99,7 @@ for env in envs_needed(EXPERIMENTS + COMPARE):
 
 Starts every experiment (and the autoencoders they need) in the background, up to `MAX_PARALLEL` at once.
 Latent models wait for their autoencoder. The cell returns immediately; use the next cell to watch progress."""),
-    code("""runner = Runner(EXPERIMENTS, RUNS, max_parallel=MAX_PARALLEL, max_minutes=MAX_MINUTES)
+    code("""runner = Runner(EXPERIMENTS, RUNS, max_parallel=MAX_PARALLEL, max_minutes=MAX_MINUTES, steps=STEPS)
 runner.start()"""),
 
     md("""**Watch progress.** Re-run this cell whenever you like: state of each run, its last log line
@@ -111,15 +120,16 @@ One table per environment (same test episodes and seeds for every model):
 
 Differences smaller than the ± are not trustworthy."""),
     code("""from collections import defaultdict
+from colab.runner import run_name
 by_env = defaultdict(list)
 for n in COMPARE:
-    by_env[ALL_EXPERIMENTS[n]['env']].append(f'{RUNS}/{n}.pt')
+    by_env[ALL_EXPERIMENTS[n]['env']].append(f'{RUNS}/{run_name(n, STEPS)}.pt')
 for env, ckpts in by_env.items():
     print(f'\\n=========== {env} ===========')
     !python diagnostics/compare_wm.py {' '.join(ckpts)} --seeds {SEEDS}"""),
 
     md("""**Look at one model.** One-step predictions, the action test, and a 40-step rollout (left truth, right model)."""),
-    code("""LOOK_AT = 'crafter_dit_df'
+    code("""LOOK_AT = run_name('crafter_dit_last', STEPS)   # file name of the run to look at
 from IPython.display import Image, display
 !python evaluate.py --ckpt {RUNS}/{LOOK_AT}.pt --out outputs/eval_{LOOK_AT} --horizon 40 | tail -5
 display(Image(f'outputs/eval_{LOOK_AT}/actions.png', width=900))

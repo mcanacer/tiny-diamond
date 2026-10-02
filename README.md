@@ -157,6 +157,21 @@ At this small CPU budget the transformer is still much weaker than the U-Net, wh
 almost perfectly. In its rollouts the paddle follows the actions but the ball fades. Transformers usually need
 more data and steps than convolutional models to catch up, so the A100 runs on Crafter are the real test.
 
+### First A100 results on Crafter (unequal, partial runs)
+
+| model | steps done | 1-step vs copy ↓ | inv@10 ↓ | detail@40 ↑ |
+|---|---|---|---|---|
+| `crafter_big_noise` (pixel U-Net) | 40k / 40k | 0.332±0.014 | 0.034±0.003 | 0.614±0.013 |
+| `crafter_latent_unet` | 20k / 40k | 0.346±0.037 | **0.012±0.000** | 0.658±0.029 |
+| `crafter_dit_last` | 10k / 40k | **0.313±0.020** | **0.012±0.000** | 0.612±0.002 |
+| `crafter_dit_df` | 10k / 40k | 0.388±0.015 | **0.012±0.001** | 0.611±0.002 |
+
+The latent models keep the inventory bar 3x more accurate early in a rollout. The transformer already matches
+the best U-Net with a quarter of the steps. Diffusion Forcing is behind on one-step prediction this early.
+All models drift to the same place by step 40. The runs stopped at different points with their learning rate
+still high, so this isn't a fair ranking yet: the notebook's `STEPS` setting trains every model for the same
+short budget with a finished schedule.
+
 `wm/world_model.py` puts every model type behind one interface (`predict`, `reset`, `step`), so `evaluate.py`,
 `play.py` and `diagnostics/compare_wm.py` work with any of them.
 
